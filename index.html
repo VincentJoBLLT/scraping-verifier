@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Analyseur de Scrapabilité</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 0 20px;
+            background-color: #f9fafb;
+            color: #1f2937;
+        }
+        h1 { color: #111827; }
+        .control-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        input[type="url"] {
+            flex: 1;
+            padding: 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 16px;
+        }
+        button {
+            padding: 12px 24px;
+            background-color: #2563eb;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover { background-color: #1d4ed8; }
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            display: none;
+        }
+        pre {
+            background: #1f2937;
+            color: #e5e7eb;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-size: 14px;
+        }
+        .status-ok { color: #16a34a; font-weight: bold; }
+        .status-error { color: #dc2626; font-weight: bold; }
+        .status-warning { color: #d97706; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <h1>Analyseur de Scrapabilité & Crawling</h1>
+    <p>Cet outil utilise un proxy public pour contourner la sécurité CORS des navigateurs et analyser les fichiers de configuration (robots.txt et sitemap.xml) du site cible.</p>
+
+    <div class="control-group">
+        <input type="url" id="urlInput" placeholder="Ex: https://www.wikipedia.org" required>
+        <button onclick="startAnalysis()" id="analyzeBtn">Analyser le site</button>
+    </div>
+
+    <div id="resultsCard" class="card">
+        <h2>Résultats de l'analyse</h2>
+        
+        <h3>1. Protections et Faisabilité (robots.txt)</h3>
+        <p id="robotsStatus">En attente...</p>
+        <pre id="robotsContent">...</pre>
+
+        <h3>2. Architecture et Volume (sitemap.xml)</h3>
+        <p id="sitemapStatus">En attente...</p>
+        <pre id="sitemapContent">...</pre>
+    </div>
+
+    <script>
+        // Fonction pour utiliser le proxy gratuit AllOrigins afin de contourner le CORS
+        async function fetchViaProxy(url) {
+            const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+            const response = await fetch(proxyUrl);
+            if (!response.ok) throw new Error('Erreur réseau avec le proxy');
+            const data = await response.json();
+            
+            // AllOrigins renvoie null si la page cible est bloquée (ex: par Cloudflare)
+            if (data.contents === null) {
+                throw new Error('Bloqué par une protection anti-bot (Cloudflare, Datadome, WAF...)');
+            }
+            return data.contents;
+        }
+
+        // Nettoie l'URL pour obtenir la racine (ex: https://example.com)
+        function getRootUrl(inputUrl) {
+            try {
+                const urlObj = new URL(inputUrl);
+                return `${urlObj.protocol}//${urlObj.hostname}`;
+            } catch (e) {
+                return null;
+            }
+        }
+
+        async function startAnalysis() {
+            const rawUrl = document.getElementById('urlInput').value;
+            const rootUrl = getRootUrl(rawUrl);
+            
+            if (!rootUrl) {
+                alert("Veuillez entrer une URL valide (commençant par http:// ou https://)");
+                return;
+            }
+
+            const btn = document.getElementById('analyzeBtn');
+            const card = document.getElementById('resultsCard');
+            
+            btn.innerText = "Analyse en cours...";
+            btn.disabled = true;
+            card.style.display = 'block';
+
+            // Réinitialisation de l'affichage
+            document.getElementById('robotsStatus').innerHTML = 'Recherche du robots.txt...';
+            document.getElementById('robotsContent').innerText = '';
+            document.getElementById('sitemapStatus').innerHTML = 'Recherche du sitemap.xml...';
+            document.getElementById('sitemapContent').innerText = '';
+
+            // 1. Analyse du Robots.txt
+            try {
+                const robotsText = await fetchViaProxy(`${rootUrl}/robots.txt`);
+                if (robotsText.toLowerCase().includes('html')) {
+                    // Si on reçoit du HTML, c'est souvent une page 404 déguisée
+                    throw new Error("Fichier non trouvé (404)");
+                }
+                
+                let protectionLevel = "<span class='status-ok'>Scraping probablement autorisé (Vérifiez les règles ci-dessous)</span>";
+                if (robotsText.includes('Disallow: /')) {
+                    protectionLevel = "<span class='status-warning'>Le site demande aux bots de ne pas scrapper certaines zones.</span>";
+                }
+                
+                document.getElementById('robotsStatus').innerHTML = protectionLevel;
+                document.getElementById('robotsContent').innerText = robotsText.trim().substring(0, 1000) + (robotsText.length > 1000 ? '\n\n...[Tronqué]' : '');
+            } catch (error) {
+                document.getElementById('robotsStatus').innerHTML = `<span class='status-error'>Impossible de lire le robots.txt : ${error.message}. <br>Le site dispose peut-être d'un pare-feu applicatif (WAF) bloquant les requêtes automatisées.</span>`;
+            }
+
+            // 2. Analyse du Sitemap.xml (Pour compter les pages)
+            try {
+                const sitemapText = await fetchViaProxy(`${rootUrl}/sitemap.xml`);
+                
+                if (sitemapText.toLowerCase().includes('html') && !sitemapText.includes('<?xml')) {
+                    throw new Error("Sitemap standard non trouvé à la racine.");
+                }
+
+                // Parser l'XML pour compter les URLs
+                const parser = new DOMParser();
+                const xmlDoc = parser.parseFromString(sitemapText, "text/xml");
+                const urls = xmlDoc.getElementsByTagName("url");
+                const sitemaps = xmlDoc.getElementsByTagName("sitemap");
+
+                if (urls.length > 0) {
+                    document.getElementById('sitemapStatus').innerHTML = `<span class='status-ok'>Succès ! ${urls.length} pages trouvées dans ce sitemap.</span>`;
+                    
+                    // Extraire les 10 premières URLs pour l'exemple
+                    let urlList = "Aperçu des premières pages :\n";
+                    for (let i = 0; i < Math.min(urls.length, 10); i++) {
+                        const loc = urls[i].getElementsByTagName("loc")[0]?.textContent;
+                        if (loc) urlList += `- ${loc}\n`;
+                    }
+                    if (urls.length > 10) urlList += `\n... et ${urls.length - 10} autres pages.`;
+                    
+                    document.getElementById('sitemapContent').innerText = urlList;
+                } else if (sitemaps.length > 0) {
+                    document.getElementById('sitemapStatus').innerHTML = `<span class='status-warning'>Sitemap index trouvé contenant ${sitemaps.length} sous-sitemaps. Il faudrait scrapper chaque sous-sitemap pour avoir le compte total.</span>`;
+                    
+                    let sitemapList = "Liste des sous-sitemaps :\n";
+                    for (let i = 0; i < Math.min(sitemaps.length, 10); i++) {
+                        const loc = sitemaps[i].getElementsByTagName("loc")[0]?.textContent;
+                        if (loc) sitemapList += `- ${loc}\n`;
+                    }
+                    document.getElementById('sitemapContent').innerText = sitemapList;
+                } else {
+                     document.getElementById('sitemapStatus').innerHTML = "<span class='status-warning'>Fichier XML trouvé mais aucune balise standard <url> détectée.</span>";
+                }
+
+            } catch (error) {
+                document.getElementById('sitemapStatus').innerHTML = `<span class='status-error'>Impossible d'analyser le sitemap : ${error.message}</span>`;
+                document.getElementById('sitemapContent').innerText = "Sans Sitemap, il est impossible de lister les pages depuis un navigateur web. Un script backend (Python/NodeJS) serait nécessaire pour crawler le site de lien en lien.";
+            }
+
+            btn.innerText = "Analyser le site";
+            btn.disabled = false;
+        }
+    </script>
+</body>
+</html>
